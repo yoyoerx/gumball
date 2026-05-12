@@ -48,20 +48,20 @@ Gumball connects a Meta Quest 3 to a TP-Link Kasa KC410S pan/tilt IP camera over
 ```bash
 cd PythonBackend
 pip install -r requirements.txt
-copy config.example.py config.py
+copy .env.example .env
 ```
 
-Edit `config.py` with your values:
+Edit `.env` with your values:
 
-```python
-SERVER_HOST    = "192.168.1.x"     # This PC's LAN IP
-KASA_CAMERA_IP = "192.168.1.x"     # Your KC410S LAN IP
-KASA_USERNAME  = "your@email.com"  # Kasa cloud account email
-KASA_PASSWORD  = "yourPassword"    # Kasa cloud account password
+```
+SERVER_HOST=192.168.1.x
+KASA_CAMERA_IP=192.168.1.x
+KASA_USERNAME=your@email.com
+KASA_PASSWORD=yourKasaPassword
 ```
 
 > **Note:** The KC410S authenticates with your Kasa cloud credentials, not a local device password.
-> `config.py` is gitignored and must not be committed.
+> `.env` is gitignored and must not be committed.
 
 Start the server:
 

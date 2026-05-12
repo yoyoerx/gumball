@@ -1,7 +1,7 @@
 # ============================================================
 # Secrets and local config (NEVER commit these)
 # ============================================================
-PythonBackend/config.py
+PythonBackend/.env
 PythonBackend/settings.json
 
 # ============================================================
@@ -50,6 +50,11 @@ PythonBackend/kasa_intercept.py
 # Unity crash report
 sysinfo.txt
 crashlytics-build.properties
+
+# Build outputs
+*.apk
+*.aab
+*_BurstDebugInformation_DoNotShip/
 
 # ============================================================
 # OS
