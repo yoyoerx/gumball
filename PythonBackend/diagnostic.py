@@ -8,7 +8,7 @@ Live GUI that exercises all three server.py endpoints simultaneously:
   :9000  detection      — sends frames every 0.5 s, shows tracked detections
 
 Usage:
-    python diagnostic.py [host]        # host defaults to 192.168.1.222
+    python diagnostic.py [host]        # host defaults to config.SERVER_HOST
 
 Dependencies:
     pip install websockets pillow
@@ -38,7 +38,11 @@ from camera_discovery import discover_cameras, get_camera_ip, load_settings, sav
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-DEFAULT_HOST    = "192.168.1.222"
+try:
+    import config as _cfg
+    DEFAULT_HOST = _cfg.SERVER_HOST
+except Exception:
+    DEFAULT_HOST = "localhost"
 STREAM_PORT     = 8081
 PTZ_PORT        = 8082
 DETECT_PORT     = 9000

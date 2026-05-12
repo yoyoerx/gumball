@@ -67,5 +67,5 @@ def save_settings(updates: dict) -> None:
         json.dump(s, f, indent=2)
 
 
-def get_camera_ip(fallback: str = "192.168.1.199") -> str:
+def get_camera_ip(fallback: str = "YOUR_CAMERA_IP") -> str:
     return load_settings().get("camera_ip", fallback)

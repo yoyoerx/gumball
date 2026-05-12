@@ -5,7 +5,7 @@ Launches `server.py` and `diagnostic.py` in sequence.
 ## Usage
 
 ```powershell
-.\start.ps1                       # default host 192.168.1.222
+.\start.ps1                       # host read from config.SERVER_HOST
 .\start.ps1 -ServerHost <ip>      # override server host
 ```
 
