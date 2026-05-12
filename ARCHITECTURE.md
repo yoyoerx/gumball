@@ -48,8 +48,9 @@ The TP-Link Kasa KC410S is a consumer pan/tilt IP camera with no RTSP support an
 | `detector.py` | YOLOv8 inference wrapper; returns detection JSON per frame |
 | `camera_discovery.py` | UDP broadcast scan for KC-series cameras; persists choice to `settings.json` |
 | `diagnostic.py` | Interactive runtime dashboard (stream FPS, PTZ position, detection rate) |
-| `config.py` | User-local config: IP addresses, Kasa credentials, model settings (gitignored) |
-| `config.example.py` | Committed template; copy to `config.py` and fill in values |
+| `config.py` | Committed config; reads all values from `.env` via python-dotenv |
+| `.env` | Gitignored secrets file: IPs, Kasa credentials, model settings |
+| `.env.example` | Committed placeholder template; copy to `.env` and fill in values |
 | `start.ps1` | Launches `server.py` + `diagnostic.py` in sequence |
 
 ### UnityProject / Assets / Scripts
@@ -144,8 +145,8 @@ Separate ports for stream (8081), PTZ (8082), and detection (9000) rather than o
 ### ADR-008: Camera discovery via python-kasa UDP
 `camera_discovery.py` uses python-kasa's `Discover.discover()` (UDP broadcast) to find KC-series devices. The selected camera IP is persisted to `settings.json` and loaded by `config.py` at startup, surviving server restarts.
 
-### ADR-009: config.py gitignored
-`config.py` (real credentials) is gitignored. `config.example.py` (placeholder values) is committed. Users copy the example and fill in their Kasa email, password, and IP addresses. `settings.json` (runtime camera selection) is also gitignored.
+### ADR-009: Credentials in .env via python-dotenv
+`config.py` is committed and contains no secrets — it reads all sensitive values from a `.env` file using python-dotenv. `.env` is gitignored and never committed. `.env.example` (placeholder values) is committed as the setup template. `settings.json` (runtime camera selection written by `camera_discovery.py`) is also gitignored.
 
 ### ADR-010: YOLOv8n default model
 YOLOv8 nano is the default for inference speed on the Python server. The `.pt` model file is gitignored; ultralytics downloads it on first run. Switch to `yolov8s.pt` / `yolov8m.pt` in `config.py` for better accuracy.
@@ -168,8 +169,9 @@ MetaGimbalVision/
 |   +-- detector.py
 |   +-- camera_discovery.py
 |   +-- diagnostic.py
-|   +-- config.example.py    <- Committed template
-|   +-- config.py            <- Gitignored; fill in from example
+|   +-- config.py            <- Committed; reads from .env via python-dotenv
+|   +-- .env.example         <- Committed template; copy to .env
+|   +-- .env                 <- Gitignored; fill in real credentials
 |   +-- settings.json        <- Gitignored; written by camera_discovery
 |   +-- requirements.txt
 |   +-- start.ps1
@@ -222,4 +224,4 @@ MetaGimbalVision/
 
 ---
 
-*Last updated: 2026-05-12*
+*Last updated: 2026-05-12 — ADR-009 updated: credentials moved to .env + python-dotenv*
