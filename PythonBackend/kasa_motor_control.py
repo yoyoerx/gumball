@@ -38,8 +38,7 @@ class _LegacyTLSAdapter(HTTPAdapter):
         kwargs["ssl_context"] = ctx
         super().init_poolmanager(*args, **kwargs)
 
-_LINKIE_URL = f"https://{config.KASA_CAMERA_IP}:10443/data/LINKIE2.json"
-_XOR_IV     = 0xAB
+_XOR_IV = 0xAB
 
 DIRECTIONS = frozenset({
     "top", "bottom", "left", "right",
@@ -87,10 +86,15 @@ class KasaMotorControl:
         self._session = requests.Session()
         self._session.mount("https://", _LegacyTLSAdapter())
         self._auth = (config.KASA_USERNAME, config.KASA_PASSWORD)
+        self._url  = f"https://{config.KASA_CAMERA_IP}:10443/data/LINKIE2.json"
+
+    def set_camera_ip(self, ip: str) -> None:
+        self._url = f"https://{ip}:10443/data/LINKIE2.json"
+        log.info(f"[KasaMotor] Camera IP updated -> {ip}")
 
     def login(self) -> bool:
         """No-op — local Linkie uses HTTP Basic auth, always ready."""
-        log.info(f"[KasaMotor] Local Linkie at {_LINKIE_URL} — no login needed.")
+        log.info(f"[KasaMotor] Local Linkie at {self._url} — no login needed.")
         return True
 
     # ── PTZ commands ──────────────────────────────────────────────────────────
@@ -130,7 +134,7 @@ class KasaMotorControl:
     def _send_raw(self, cmd: dict) -> dict | None:
         try:
             r = self._session.post(
-                _LINKIE_URL,
+                self._url,
                 data=_encode(cmd),
                 auth=self._auth,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -155,7 +159,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(message)s")
 
     motor = KasaMotorControl()
-    print(f"Target: {_LINKIE_URL}")
+    print(f"Target: {motor._url}")
 
     pos = motor.get_position()
     print(f"Current position: {pos}")

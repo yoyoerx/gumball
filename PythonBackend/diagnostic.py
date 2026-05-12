@@ -322,7 +322,6 @@ class App(tk.Tk):
     def _build_right(self, parent):
         rp = tk.Frame(parent, bg=BG, width=270)
         rp.pack(side=tk.LEFT, padx=(12, 0), fill=tk.Y)
-        rp.pack_propagate(False)
 
         # Detections section
         tk.Label(rp, text="DETECTIONS", bg=BG, fg=ACCENT,
@@ -331,7 +330,7 @@ class App(tk.Tk):
         det_box = tk.Frame(rp, bg=BG2)
         det_box.pack(fill=tk.X, pady=(2, 8))
         self._det_rows = []
-        for _ in range(8):
+        for _ in range(5):
             w = tk.Label(det_box, text="", bg=BG2, fg=FG_DIM,
                          font=("Courier", 9), anchor=tk.W, padx=6)
             w.pack(fill=tk.X, pady=1)

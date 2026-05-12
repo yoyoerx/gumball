@@ -45,6 +45,7 @@ def _request_camera_switch(ip: str) -> None:
     global _pending_camera_ip
     with _camera_lock:
         _pending_camera_ip = ip
+    motor.set_camera_ip(ip)
     _camera_switch_evt.set()
 
 
