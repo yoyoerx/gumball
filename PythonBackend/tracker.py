@@ -56,9 +56,9 @@ UI_MS    = 33        # ~30 Hz UI refresh
 
 # ── Tracking parameters ───────────────────────────────────────────────────────
 
-DEAD_ZONE      = 0.08   # center no-move zone (fraction of frame)
-MIN_SPEED      = 2
-MAX_SPEED      = 8
+DEAD_ZONE      = 0.12   # center no-move zone (fraction of frame)
+MIN_SPEED      = 1
+MAX_SPEED      = 4      # conservative default; raise via UI slider if needed
 LOST_TIMEOUT_S = 2.0    # seconds absent before track considered lost
 DETECT_HZ      = 10     # detection requests per second
 TRACK_HZ       = 10     # PTZ command rate while tracking
@@ -97,6 +97,9 @@ _ptz_resp_q = queue.Queue(maxsize=8)  # dict PTZ response
 _ptz_cmd_q  = queue.Queue()           # dict PTZ commands to send
 
 _stop = threading.Event()
+
+# Live-tunable parameters (written by UI sliders, read by tracking thread)
+_tune = {"max_speed": MAX_SPEED, "dead_zone": DEAD_ZONE}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -240,6 +243,29 @@ def _tracking_thread():
         target = next((d for d in dets if d.get("trackId") == tid), None)
 
         if target is None:
+            # Re-identify: fast pan can cause ByteTrack to assign a new ID to
+            # the same physical object.  Search for any detection of the same
+            # label and adopt the one closest to the frame center (where we've
+            # been steering the camera).
+            with _track_lock:
+                track_label = _track_state["track_label"]
+            same_label = [d for d in dets if d.get("label") == track_label]
+            if same_label:
+                def _center_dist(d):
+                    bb = d.get("boundingBox", {})
+                    cx = bb.get("x", 0.5) + bb.get("width",  0) / 2.0
+                    cy = bb.get("y", 0.5) + bb.get("height", 0) / 2.0
+                    return (cx - 0.5) ** 2 + (cy - 0.5) ** 2
+                best    = min(same_label, key=_center_dist)
+                new_tid = best.get("trackId", 0)
+                if new_tid > 0:
+                    with _track_lock:
+                        _track_state["track_id"]  = new_tid
+                        _track_state["last_seen"] = time.time()
+                    tid    = new_tid
+                    target = best
+
+        if target is None:
             if time.time() - last_seen > LOST_TIMEOUT_S:
                 # Track lost -- stop and return to home
                 _ptz_cmd_q.put({"cmd": "ptz_stop"})
@@ -263,6 +289,10 @@ def _tracking_thread():
         with _track_lock:
             _track_state["last_seen"] = time.time()
 
+        # Read live-tunable parameters
+        dead_zone = _tune["dead_zone"]
+        max_speed = _tune["max_speed"]
+
         # Compute center offset (normalized, origin at frame center)
         bb = target.get("boundingBox", {})
         cx = bb.get("x", 0.5) + bb.get("width",  0) / 2.0
@@ -275,14 +305,14 @@ def _tracking_thread():
 
         mag = max(abs(dx), abs(dy))
 
-        if mag < DEAD_ZONE:
+        if mag < dead_zone:
             if prev_dir is not None:
                 _ptz_cmd_q.put({"cmd": "ptz_stop"})
                 prev_dir   = None
                 prev_speed = 0
         else:
-            h_dir = ("right" if dx > 0 else "left") if abs(dx) > DEAD_ZONE else None
-            v_dir = ("bottom" if dy > 0 else "top") if abs(dy) > DEAD_ZONE else None
+            h_dir = ("right" if dx > 0 else "left") if abs(dx) > dead_zone else None
+            v_dir = ("bottom" if dy > 0 else "top") if abs(dy) > dead_zone else None
 
             if h_dir and v_dir:
                 direction = f"{v_dir} {h_dir}"
@@ -291,7 +321,7 @@ def _tracking_thread():
             else:
                 direction = v_dir
 
-            speed = int(MIN_SPEED + (MAX_SPEED - MIN_SPEED) * min(mag / 0.35, 1.0))
+            speed = int(MIN_SPEED + (max_speed - MIN_SPEED) * min(mag / 0.35, 1.0))
 
             if direction != prev_dir or abs(speed - prev_speed) >= 2:
                 _ptz_cmd_q.put({"cmd": "ptz_start",
@@ -405,6 +435,27 @@ class App(tk.Tk):
         self._offset_lbl = tk.Label(rp, text="x:  --      y:  --",
                                     bg=BG, fg=FG, font=("Courier", 9))
         self._offset_lbl.pack(anchor=tk.W, pady=(2, 0))
+
+        section("TUNING")
+
+        def _slider(label, from_, to, resolution, key, fmt=str):
+            tk.Label(rp, text=label, bg=BG, fg=FG_DIM,
+                     font=("Arial", 8)).pack(anchor=tk.W, pady=(4, 0))
+            s = tk.Scale(
+                rp, from_=from_, to=to, resolution=resolution,
+                orient=tk.HORIZONTAL, length=210,
+                bg=BG, fg=FG, troughcolor=BG3, highlightthickness=0,
+                showvalue=True, font=("Courier", 8),
+                command=lambda v: _tune.update({key: fmt(v)}),
+            )
+            s.set(_tune[key])
+            s.pack(anchor=tk.W)
+            return s
+
+        self._speed_slider = _slider("Max speed  (1-10)", 1, 10, 1,
+                                     "max_speed", int)
+        self._dz_slider    = _slider("Dead zone  (0.05-0.30)", 0.05, 0.30, 0.01,
+                                     "dead_zone", float)
 
         section("HOW TO USE")
         for line in (
@@ -550,7 +601,7 @@ class App(tk.Tk):
                 (cx, cy + 4,  cx, cy + 14),
             ):
                 self._canvas.create_line(x0, y0, x1, y1,
-                                         fill="#ffffff55", width=1, tags="xhair")
+                                         fill="#888888", width=1, tags="xhair")
 
         # ── PTZ position response -> complete home-pos handshake ──────────────
         while not _ptz_resp_q.empty():
