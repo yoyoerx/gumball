@@ -48,6 +48,7 @@ The TP-Link Kasa KC410S is a consumer pan/tilt IP camera with no RTSP support an
 | `detector.py` | YOLOv8 inference wrapper; returns detection JSON per frame |
 | `camera_discovery.py` | UDP broadcast scan for KC-series cameras; persists choice to `settings.json` |
 | `diagnostic.py` | Interactive runtime dashboard (stream FPS, PTZ position, detection rate) |
+| `tracker.py` | Desktop lock-on tracker: click a YOLO box, camera follows; returns home on loss |
 | `config.py` | Committed config; reads all values from `.env` via python-dotenv |
 | `.env` | Gitignored secrets file: IPs, Kasa credentials, model settings |
 | `.env.example` | Committed placeholder template; copy to `.env` and fill in values |
@@ -169,6 +170,7 @@ MetaGimbalVision/
 |   +-- detector.py
 |   +-- camera_discovery.py
 |   +-- diagnostic.py
+|   +-- tracker.py           <- Lock-on object tracker (click box -> camera follows)
 |   +-- config.py            <- Committed; reads from .env via python-dotenv
 |   +-- .env.example         <- Committed template; copy to .env
 |   +-- .env                 <- Gitignored; fill in real credentials
