@@ -134,6 +134,12 @@ class ObjectDetector:
         print(f"[Detector] {config.YOLO_MODEL} on {config.DEVICE}")
         print(f"[Detector] Observations → {_LOG_PATH}")
 
+    def reload(self) -> None:
+        self.obs_log.flush()
+        self.model = YOLO(config.YOLO_MODEL)
+        self.model.to(config.DEVICE)
+        print(f"[Detector] Reloaded {config.YOLO_MODEL} on {config.DEVICE}")
+
     def detect(self, jpeg_bytes: bytes) -> DetectionFrame:
         arr   = np.frombuffer(jpeg_bytes, np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)

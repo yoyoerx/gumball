@@ -34,7 +34,7 @@ except ImportError:
     print("ERROR: Pillow is required.  pip install pillow")
     sys.exit(1)
 
-from camera_discovery import discover_cameras, get_camera_ip, load_settings, save_settings
+from camera_discovery import discover_cameras, get_camera_ip, load_settings
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -299,10 +299,10 @@ class App(tk.Tk):
 
     def _on_camera_select(self, _=None):
         ip = self._cam_var.get()
-        save_settings({"camera_ip": ip})
-        self._cam_status.configure(text="Saved — restart server to apply", fg=ACCENT)
-        self._default_lbl.configure(text=f"default: {ip}")
-        _log(f"Camera default set to {ip} — restart server to apply")
+        _ptz_cmd_q.put({"cmd": "set_camera", "ip": ip})
+        self._cam_status.configure(text="Switching...", fg=ACCENT)
+        self._default_lbl.configure(text=f"active: {ip}")
+        _log(f"Requesting camera switch to {ip}...")
 
     def _build_video(self, parent):
         vf = tk.Frame(parent, bg="#000")
@@ -390,9 +390,30 @@ class App(tk.Tk):
         tk.Frame(rp, bg=BG3, height=1).pack(fill=tk.X, pady=(12, 4))
 
         # Inference time
-        self._infer_var = tk.StringVar(value="Inference: – ms")
+        self._infer_var = tk.StringVar(value="Inference: - ms")
         tk.Label(rp, textvariable=self._infer_var, bg=BG, fg=FG_DIM,
                  font=("Courier", 9)).pack(anchor=tk.W)
+
+        tk.Frame(rp, bg=BG3, height=1).pack(fill=tk.X, pady=(8, 4))
+
+        # Detector controls
+        tk.Label(rp, text="DETECTOR", bg=BG, fg=ACCENT,
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)
+
+        self._det_enabled_lbl = tk.Label(rp, text="Enabled", bg=BG, fg=GREEN,
+                                         font=("Courier", 9))
+        self._det_enabled_lbl.pack(anchor=tk.W, pady=(2, 4))
+
+        det_btns = tk.Frame(rp, bg=BG)
+        det_btns.pack(anchor=tk.W)
+        bstyle = dict(bg=BG3, fg=FG, font=("Arial", 9), relief=tk.FLAT,
+                      padx=8, pady=4, cursor="hand2")
+        tk.Button(det_btns, text="Enable",  **bstyle,
+                  command=lambda: _ptz_cmd_q.put({"cmd": "detector_enable"})).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(det_btns, text="Disable", **bstyle,
+                  command=lambda: _ptz_cmd_q.put({"cmd": "detector_disable"})).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(det_btns, text="Reload",  **bstyle,
+                  command=lambda: _ptz_cmd_q.put({"cmd": "detector_reload"})).pack(side=tk.LEFT)
 
     def _build_log(self):
         lf = tk.Frame(self, bg=BG2)
@@ -445,6 +466,21 @@ class App(tk.Tk):
                 r = _ptz_q.get_nowait()
                 if r.get("ok") and "x" in r:
                     self._pos_lbl.configure(text=f"  x:{r['x']}  y:{r['y']}")
+                ct = r.get("cmd_type", "")
+                if ct == "set_camera":
+                    self._cam_status.configure(text="Active", fg=GREEN)
+                    _log("Camera switched")
+                elif ct == "detector_status":
+                    enabled = r.get("enabled", True)
+                    self._det_enabled_lbl.configure(
+                        text="Enabled" if enabled else "Disabled",
+                        fg=GREEN if enabled else RED)
+                elif ct == "detector_reloading":
+                    self._det_enabled_lbl.configure(text="Reloading...", fg=ACCENT)
+                    _log("Detector reloading...")
+                elif ct == "detector_reload":
+                    self._det_enabled_lbl.configure(text="Enabled", fg=GREEN)
+                    _log("Detector reloaded")
 
             # Log messages
             while not _log_q.empty():
