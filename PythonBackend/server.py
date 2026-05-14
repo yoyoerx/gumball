@@ -66,7 +66,10 @@ async def handle_detection(ws):
             if isinstance(msg, bytes):
                 with _detector_lock:
                     enabled = _detector_state["enabled"]
-                frame = detector.detect(msg) if enabled else DetectionFrame()
+                if enabled:
+                    frame = await asyncio.to_thread(detector.detect, msg)
+                else:
+                    frame = DetectionFrame()
                 await ws.send(json.dumps(frame.to_dict()))
     except websockets.ConnectionClosed:
         pass

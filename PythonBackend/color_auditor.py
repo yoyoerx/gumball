@@ -95,8 +95,21 @@ class ColorAuditor:
 
     @staticmethod
     def _hist(crop: np.ndarray) -> np.ndarray:
-        """Normalized 2-D HSV histogram (Hue x Saturation)."""
-        hsv  = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        """Normalized 2-D HSV histogram using the inner 70% of the crop.
+
+        Trimming the border reduces background contamination when the
+        bounding box is slightly larger than the object or the camera
+        is panning (background pixels shift while the object color stays
+        the same).
+        """
+        h, w = crop.shape[:2]
+        # Trim 15% off each edge -> keep central 70%
+        dy = max(1, int(h * 0.15))
+        dx = max(1, int(w * 0.15))
+        inner = crop[dy:h - dy, dx:w - dx]
+        if inner.size == 0:
+            inner = crop  # fallback: box too small to trim
+        hsv  = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
         hist = cv2.calcHist(
             [hsv], [0, 1], None,
             [180, 256],
