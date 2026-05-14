@@ -10,6 +10,7 @@ public class ControlPanel : MonoBehaviour
     [Header("Dependencies")]
     [SerializeField] private KasaPTZController    gimbal;
     [SerializeField] private GimbalInputController inputController;
+    [SerializeField] public  LockOnTracker         lockOnTracker;
 
     // ── Tab pages ──────────────────────────────────────────────────────────────
     [Header("Tabs")]
@@ -37,7 +38,9 @@ public class ControlPanel : MonoBehaviour
 
     [Header("Gimbal — Buttons")]
     [SerializeField] private Button          centerButton;
-    [SerializeField] private Button          lockOnButton;
+    [SerializeField] private Button          lockOnButton;       // repurposed: Stop Tracking
+    [SerializeField] private TextMeshProUGUI lockOnButtonLabel;
+    [SerializeField] private TextMeshProUGUI trackingStatusLabel;
     [SerializeField] private Button          connectButton;
     [SerializeField] private TextMeshProUGUI connectButtonLabel;
     [SerializeField] private Image           connectButtonBg;
@@ -75,9 +78,18 @@ public class ControlPanel : MonoBehaviour
     private void Start()
     {
         // Gimbal tab
-        centerButton .onClick.AddListener(() => gimbal?.SetAngles(0f, 0f, 0f));
-        lockOnButton .onClick.AddListener(() => gimbal?.LockTarget(new Vector2(0.5f, 0.5f)));
+        centerButton.onClick.AddListener(() => gimbal?.SetAngles(0f, 0f, 0f));
+        lockOnButton.onClick.AddListener(OnStopTracking);
         connectButton.onClick.AddListener(OnConnectToggle);
+
+        // Lock-on tracker events
+        if (lockOnTracker != null)
+        {
+            lockOnTracker.OnTrackingStarted  += OnTrackingStarted;
+            lockOnTracker.OnTrackingLost     += OnTrackingLost;
+            lockOnTracker.OnTrackingStopped  += OnTrackingStopped;
+        }
+        UpdateTrackingUI();
         followModeToggle.onValueChanged.AddListener(v => gimbal?.SetFollowMode(v));
         speedSlider.onValueChanged.AddListener(OnSpeedChanged);
         OnSpeedChanged(speedSlider.value);
@@ -117,6 +129,12 @@ public class ControlPanel : MonoBehaviour
             gimbal.OnConfigReceived -= OnConfigReceived;
             gimbal.OnScanComplete   -= OnScanComplete;
             gimbal.OnCameraApplied  -= OnCameraApplied;
+        }
+        if (lockOnTracker != null)
+        {
+            lockOnTracker.OnTrackingStarted -= OnTrackingStarted;
+            lockOnTracker.OnTrackingLost    -= OnTrackingLost;
+            lockOnTracker.OnTrackingStopped -= OnTrackingStopped;
         }
     }
 
@@ -161,6 +179,31 @@ public class ControlPanel : MonoBehaviour
         if (gimbal == null) return;
         if (gimbal.IsConnected) gimbal.Disconnect();
         else                    gimbal.Connect();
+    }
+
+    private void OnStopTracking() => lockOnTracker?.StopTracking();
+
+    private void OnTrackingStarted(int trackId, string label) => UpdateTrackingUI();
+    private void OnTrackingLost()                              => UpdateTrackingUI();
+    private void OnTrackingStopped()                           => UpdateTrackingUI();
+
+    private void UpdateTrackingUI()
+    {
+        bool tracking = lockOnTracker != null && lockOnTracker.IsTracking;
+
+        if (trackingStatusLabel != null)
+        {
+            if (lockOnTracker == null)
+                trackingStatusLabel.text = "";
+            else if (tracking)
+                trackingStatusLabel.text = $"Tracking [{lockOnTracker.LockedTrackId}] {lockOnTracker.LockedLabel}";
+            else
+                trackingStatusLabel.text = "Idle";
+        }
+
+        if (lockOnButton != null)    lockOnButton.interactable = tracking;
+        if (lockOnButtonLabel != null)
+            lockOnButtonLabel.text = "Stop Tracking";
     }
 
     private void OnSpeedChanged(float value)

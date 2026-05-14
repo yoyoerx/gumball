@@ -217,7 +217,7 @@ public class KasaPTZController : MonoBehaviour, IGimbalController
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private void StopMoving()
+    public void StopMoving()
     {
         _isMoving = false; _lastDir = "";
         SendRaw("{\"cmd\":\"ptz_stop\"}");

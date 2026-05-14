@@ -2,14 +2,15 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.XR;
 
-// Right thumbstick → gimbal pan/tilt.
-// Right trigger hold → lock-on: sends the center detection's normalized coord.
+// Right thumbstick -> gimbal pan/tilt (suppressed while LockOnTracker is active).
+// Right trigger (rising edge) -> BeginTracking best detection if idle; StopTracking if tracking.
 public class GimbalInputController : MonoBehaviour
 {
-    [SerializeField] private KasaPTZController gimbal;
+    [SerializeField] private KasaPTZController      gimbal;
     [SerializeField] private ObjectDetectionManager detectionManager;
+    [SerializeField] public  LockOnTracker          lockOnTracker;
     [SerializeField] private float joystickSensitivity = 60f; // degrees/sec
-    [SerializeField] private bool invertPitch;
+    [SerializeField] private bool  invertPitch;
 
     public float JoystickSensitivity
     {
@@ -17,8 +18,9 @@ public class GimbalInputController : MonoBehaviour
         set => joystickSensitivity = value;
     }
 
-    private InputDevice _right;
+    private InputDevice    _right;
     private DetectionFrame _lastFrame;
+    private bool           _triggerWasDown;
 
     private void Start()
     {
@@ -41,30 +43,55 @@ public class GimbalInputController : MonoBehaviour
     {
         if (!_right.isValid || !gimbal.IsConnected) return;
 
-        if (_right.TryGetFeatureValue(CommonUsages.primary2DAxis, out var stick) &&
-            stick.sqrMagnitude > 0.01f)
+        bool tracking = lockOnTracker != null && lockOnTracker.IsTracking;
+
+        // Thumbstick: suppressed while tracker is active (tracker drives the gimbal)
+        if (!tracking)
         {
-            float yawRate   = stick.x * joystickSensitivity;
-            float pitchRate = (invertPitch ? -stick.y : stick.y) * joystickSensitivity;
-            gimbal.SetAngularVelocity(yawRate, pitchRate);
-        }
-        else
-        {
-            gimbal.SetAngularVelocity(0f, 0f);
+            if (_right.TryGetFeatureValue(CommonUsages.primary2DAxis, out var stick) &&
+                stick.sqrMagnitude > 0.01f)
+            {
+                float yawRate   = stick.x * joystickSensitivity;
+                float pitchRate = (invertPitch ? -stick.y : stick.y) * joystickSensitivity;
+                gimbal.SetAngularVelocity(yawRate, pitchRate);
+            }
+            else
+            {
+                gimbal.SetAngularVelocity(0f, 0f);
+            }
         }
 
-        if (_right.TryGetFeatureValue(CommonUsages.triggerButton, out bool trigger) && trigger)
-            LockOnBestDetection();
+        // Right trigger rising edge: toggle tracking
+        _right.TryGetFeatureValue(CommonUsages.triggerButton, out bool triggerDown);
+        if (triggerDown && !_triggerWasDown)
+        {
+            if (tracking)
+                lockOnTracker?.StopTracking();
+            else
+                TryBeginTracking();
+        }
+        _triggerWasDown = triggerDown;
     }
 
-    private void LockOnBestDetection()
+    private void TryBeginTracking()
     {
+        if (lockOnTracker == null) return;
         if (_lastFrame == null || _lastFrame.detections.Count == 0) return;
 
-        var best = _lastFrame.detections[0];
-        var bb = best.boundingBox;
-        var center = new Vector2(bb.x + bb.width / 2f, bb.y + bb.height / 2f);
-        gimbal.LockTarget(center);
+        // Lock on the detection closest to the frame center
+        Detection best     = null;
+        float     bestDist = float.MaxValue;
+        foreach (var d in _lastFrame.detections)
+        {
+            var bb  = d.boundingBox;
+            float cx = bb.x + bb.width  * 0.5f - 0.5f;
+            float cy = bb.y + bb.height * 0.5f - 0.5f;
+            float dist = cx * cx + cy * cy;
+            if (dist < bestDist) { best = d; bestDist = dist; }
+        }
+
+        if (best != null)
+            lockOnTracker.BeginTracking(best);
     }
 
     private void OnDestroy() => InputDevices.deviceConnected -= OnDeviceConnected;

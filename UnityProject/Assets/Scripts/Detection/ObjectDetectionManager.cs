@@ -10,7 +10,7 @@ public class ObjectDetectionManager : MonoBehaviour
 
     [Header("Server Offload")]
     [SerializeField] private bool enableServerOffload = true;
-    [SerializeField] private float serverOffloadIntervalSeconds = 0.5f;
+    [SerializeField] private float serverOffloadIntervalSeconds = 0.08f;
 
     public event Action<DetectionFrame> OnDetectionsUpdated;
 

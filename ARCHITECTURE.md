@@ -63,7 +63,7 @@ The TP-Link Kasa KC410S is a consumer pan/tilt IP camera with no RTSP support an
 | `Video/` | `VideoStreamReceiver`, `VRVideoDisplay`, `VideoFrameFollow`, `AlignToTransform` | Receive JPEG frames over WS; apply to VR quad texture |
 | `Gimbal/` | `KasaPTZController`, `GimbalNetworkController`, `GimbalSerialController`, `IGimbalController` | PTZ implementations behind a common interface |
 | `Input/` | `GimbalInputController` | Maps Quest 3 thumbstick -> `IGimbalController.SetAngularVelocity` |
-| `Detection/` | `ServerDetectionClient`, `ObjectDetectionManager`, `DetectionOverlay`, `DetectionResult`, `OnDeviceDetector` | Send frames to server; render bounding boxes in VR |
+| `Detection/` | `ServerDetectionClient`, `ObjectDetectionManager`, `DetectionOverlay`, `DetectionResult`, `OnDeviceDetector`, `LockOnTracker` | Send frames to server; render bounding boxes in VR; lock-on tracking state machine |
 | `UI/` | `ControlPanel`, `MenuToggle`, `PanelDragController` | In-VR control panel: camera scan, IP select, status readout |
 | `VR/` | `ControllerRayPointer` | Ray-cast pointer for VR UI interaction |
 | `Editor/` | `NetworkConfig`, `SceneSetup`, `OculusConfigSetup`, `RaycastSetup`, `ControlPanelSetup` | One-click Unity Editor tools for project setup |
@@ -120,7 +120,7 @@ VideoStreamReceiver.OnFrameReceived
   -> DetectionOverlay: draw bounding boxes on VR canvas
 ```
 
-### Lock-on tracking (tracker.py)
+### Lock-on tracking (tracker.py — desktop)
 
 ```
 tracker.py _detect_loop
@@ -136,11 +136,37 @@ tracker.py _tracking_thread (10 Hz)
       -> score > threshold: EMA-update anchor, proceed
       -> score <= threshold: call best_match() against all anchors
           -> match found: re-adopt that track_id
-          -> no match:    trigger return-to-home
+          -> no match:    stop camera in place (no home return)
   -> compute normalized offset (dx, dy) from frame center
-  -> dead zone check (configurable via UI slider)
+  -> dead zone check (0.01 default, configurable via UI slider)
   -> ptz_start / ptz_stop -> _ptz_cmd_q -> WS :8082
-  -> [on loss > LOST_TIMEOUT_S] ptz_stop + ptz_goto(home_x, home_y)
+  -> [on loss > LOST_TIMEOUT_S] ptz_stop (camera stops in place)
+```
+
+### Lock-on tracking (LockOnTracker.cs — VR / Meta Quest 3)
+
+```
+DetectionOverlay box prefab (Button component)
+  -> onClick -> LockOnTracker.BeginTracking(det)
+  -> locked box highlighted white; others retain track-color hue
+
+LockOnTracker.Update() (Unity main thread, 60 Hz)
+  -> reads _latestFrame from ObjectDetectionManager.OnDetectionsUpdated
+  -> FindTarget(): search by trackId; fallback to same-label closest-to-center (re-ID)
+  -> target found:
+      -> compute (dx, dy) normalized offset from frame center
+      -> inside dead zone (0.01f): gimbal.StopMoving()
+      -> outside dead zone: gimbal.SetAngularVelocity(direction * speed)
+  -> target absent: _lostTimer += deltaTime
+      -> _lostTimer > lostTimeoutSecs (2s): AbandonTracking -> gimbal.StopMoving()
+
+GimbalInputController.Update()
+  -> thumbstick: suppressed when LockOnTracker.IsTracking
+  -> right trigger (rising edge): BeginTracking(closest-to-center) or StopTracking
+
+ControlPanel
+  -> trackingStatusLabel: "Idle" / "Tracking [id] label"
+  -> lockOnButton (Stop Tracking): interactable only while tracking
 ```
 
 ---
@@ -191,6 +217,9 @@ The first appearance of a track ID sets its color anchor. If the object is heavi
 
 ### ADR-015: diagnostic.py JPEG decode on background thread
 `_render_frame` originally called `Image.open(BytesIO(jpeg)).resize(...)` on the main tkinter thread, consuming ~20–30 ms per frame inside the 67 ms UI tick budget. The decode and resize are now performed in `_stream_loop` (a daemon thread) before the PIL Image is placed in `_frame_q`. The main thread only calls `ImageTk.PhotoImage()` and `itemconfigure()`, which are fast. `Image.NEAREST` is used for the 1280→640 2:1 downscale; at exact integer ratios it is visually identical to `BILINEAR` but ~3× faster. The canvas image item is pre-created once in `_build_video` and updated via `itemconfigure` to avoid item stacking.
+
+### ADR-017: LockOnTracker.cs — VR lock-on runs on Unity main thread
+tracker.py uses a dedicated Python thread at 10 Hz because tkinter is not thread-safe and asyncio handles the WebSocket IO on separate threads. In Unity, MonoBehaviour.Update() already runs at 60 Hz on the main thread, the WebSocket dispatch is polled in KasaPTZController.Update(), and detection frames arrive via C# events (always on the main thread via NativeWebSocket's DispatchMessageQueue). LockOnTracker therefore needs no threading — Update() reads the latest DetectionFrame set by the event handler and calls gimbal.SetAngularVelocity() / StopMoving() directly. Dead zone 0.01f matches tracker.py's updated default. Loss behavior: stop in place (no ptz_goto home), matching the 2026-05-14 tracker.py change.
 
 ### ADR-016: Server port pre-flight check
 `websockets.serve()` creates internal coroutines lazily; if binding fails mid-context-entry, already-created coroutines are left unawaited, producing `RuntimeWarning: coroutine 'create_server' was never awaited`. A synchronous `_check_ports(host, *ports)` function probes each port with a temporary `socket.bind()` before any async work begins. On conflict it logs a clear human-readable error and calls `sys.exit(1)` — no coroutines are ever created. The check uses the same `SERVER_HOST` as the actual bind; checking `""` (all-interfaces) misses conflicts on Windows when the existing server is bound to a specific IP.
@@ -261,6 +290,7 @@ MetaGimbalVision/
 | 5 | Camera discovery + in-VR control panel | Done |
 | 6 | Lock-on — click VR feed to slew camera | Done |
 | 9 | Robust tracking — BoT-SORT Re-ID + ColorAuditor HSV identity guard | In Progress |
+| 6b | VR lock-on — LockOnTracker.cs; click box in VR to track; trigger toggle; stop-in-place on loss | Done |
 | 7 | On-device detection — export YOLOv8n to ONNX, Unity Sentis | TODO |
 | 8 | Quest 3 production deployment — APK, wireless perf tuning | TODO |
 
@@ -276,4 +306,4 @@ MetaGimbalVision/
 
 ---
 
-*Last updated: 2026-05-14 — ADRs 015-016: diagnostic decode threading, server port pre-flight check; 13 fps real-world ceiling documented*
+*Last updated: 2026-05-14 — ADR-017: LockOnTracker.cs VR lock-on; Phase 6b done; stop-in-place on loss; dead zone 0.01f*
