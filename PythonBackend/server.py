@@ -246,6 +246,8 @@ def capture_loop(loop: asyncio.AbstractEventLoop):
             continue
 
         log.info(f"[Stream] KC410S connected at {ip} -> ws port {config.STREAM_WS_PORT}")
+        _diag_n = 0
+        _diag_read = _diag_enc = 0.0
         try:
             while cam.is_open():
                 if _camera_switch_evt.is_set():
@@ -256,11 +258,27 @@ def capture_loop(loop: asyncio.AbstractEventLoop):
                 frame = cam.read_frame()
                 if frame is None:
                     break
+                t1 = time.monotonic()
 
                 if stream_clients:
                     _, jpeg = cv2.imencode(".jpg", frame,
                                           [cv2.IMWRITE_JPEG_QUALITY, _STREAM_QUALITY])
                     asyncio.run_coroutine_threadsafe(broadcast(jpeg.tobytes()), loop)
+                t2 = time.monotonic()
+
+                _diag_read += t1 - t0
+                _diag_enc  += t2 - t1
+                _diag_n    += 1
+                if _diag_n == 30:
+                    avg_read = _diag_read / 30 * 1000
+                    avg_enc  = _diag_enc  / 30 * 1000
+                    cam_fps  = 1000 / avg_read if avg_read > 0 else 0
+                    log.info(
+                        f"[Stream] Timing over 30 frames -- "
+                        f"read={avg_read:.1f}ms ({cam_fps:.1f} fps camera), "
+                        f"encode={avg_enc:.1f}ms"
+                    )
+                    _diag_n = _diag_read = _diag_enc = 0.0
 
                 elapsed = time.monotonic() - t0
                 wait    = frame_interval - elapsed

@@ -31,7 +31,12 @@ av.logging.set_level(av.logging.FATAL)
 log = logging.getLogger(__name__)
 
 BOUNDARY = b"--data-boundary--"
-STREAM_PATH = "/https/stream/mixed?video=h264&audio=g711&resolution=hd"
+
+def _stream_path() -> str:
+    """Build stream URL path from config.  Drop audio to avoid parsing
+    interleaved G.711 chunks that add overhead without benefit."""
+    res = getattr(config, "KASA_STREAM_TYPE", "hd")
+    return f"/https/stream/mixed?video=h264&resolution={res}"
 
 
 class _LegacySSL(HTTPAdapter):
@@ -71,7 +76,7 @@ class KasaCamera:
 
     @property
     def stream_url(self) -> str:
-        return f"https://{self.host}:19443{STREAM_PATH}"
+        return f"https://{self.host}:19443{_stream_path()}"
 
     def connect(self) -> bool:
         url = self.stream_url
