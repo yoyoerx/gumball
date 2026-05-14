@@ -39,6 +39,7 @@ _motor_ready = False
 _camera_lock       = threading.Lock()
 _pending_camera_ip = None          # None = use config.KASA_CAMERA_IP
 _camera_switch_evt = threading.Event()
+_shutdown          = threading.Event()  # set on Ctrl+C to stop capture_loop cleanly
 
 
 def _request_camera_switch(ip: str) -> None:
@@ -234,7 +235,7 @@ async def handle_stream(ws):
 def capture_loop(loop: asyncio.AbstractEventLoop):
     frame_interval = 1.0 / _STREAM_FPS
 
-    while True:
+    while not _shutdown.is_set():
         with _camera_lock:
             ip = _pending_camera_ip or config.KASA_CAMERA_IP
         _camera_switch_evt.clear()
@@ -242,14 +243,12 @@ def capture_loop(loop: asyncio.AbstractEventLoop):
         cam = KasaCamera(host=ip)
         if not cam.connect():
             log.warning(f"[Stream] KC410S not reachable at {ip} -- retrying in {_RECONNECT_SECS}s")
-            time.sleep(_RECONNECT_SECS)
+            _shutdown.wait(timeout=_RECONNECT_SECS)
             continue
 
         log.info(f"[Stream] KC410S connected at {ip} -> ws port {config.STREAM_WS_PORT}")
-        _diag_n = 0
-        _diag_read = _diag_enc = 0.0
         try:
-            while cam.is_open():
+            while cam.is_open() and not _shutdown.is_set():
                 if _camera_switch_evt.is_set():
                     log.info("[Stream] Camera switch requested -- reconnecting...")
                     break
@@ -258,38 +257,24 @@ def capture_loop(loop: asyncio.AbstractEventLoop):
                 frame = cam.read_frame()
                 if frame is None:
                     break
-                t1 = time.monotonic()
 
                 if stream_clients:
                     _, jpeg = cv2.imencode(".jpg", frame,
                                           [cv2.IMWRITE_JPEG_QUALITY, _STREAM_QUALITY])
                     asyncio.run_coroutine_threadsafe(broadcast(jpeg.tobytes()), loop)
-                t2 = time.monotonic()
-
-                _diag_read += t1 - t0
-                _diag_enc  += t2 - t1
-                _diag_n    += 1
-                if _diag_n == 30:
-                    avg_read = _diag_read / 30 * 1000
-                    avg_enc  = _diag_enc  / 30 * 1000
-                    cam_fps  = 1000 / avg_read if avg_read > 0 else 0
-                    log.info(
-                        f"[Stream] Timing over 30 frames -- "
-                        f"read={avg_read:.1f}ms ({cam_fps:.1f} fps camera), "
-                        f"encode={avg_enc:.1f}ms"
-                    )
-                    _diag_n = _diag_read = _diag_enc = 0.0
 
                 elapsed = time.monotonic() - t0
                 wait    = frame_interval - elapsed
                 if wait > 0:
-                    time.sleep(wait)
+                    _shutdown.wait(timeout=wait)  # interruptible sleep
         finally:
             cam.release()
 
+        if _shutdown.is_set():
+            break
         if not _camera_switch_evt.is_set():
             log.warning(f"[Stream] Stream dropped -- reconnecting in {_RECONNECT_SECS}s")
-            time.sleep(_RECONNECT_SECS)
+            _shutdown.wait(timeout=_RECONNECT_SECS)
 
 
 async def broadcast(data: bytes):
@@ -306,6 +291,9 @@ async def broadcast(data: bytes):
 async def main():
     loop = asyncio.get_running_loop()
 
+    # Suppress websockets connection-closed noise on shutdown
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+
     threading.Thread(target=capture_loop,       args=(loop,), daemon=True).start()
     threading.Thread(target=_motor_init_thread,               daemon=True).start()
 
@@ -316,14 +304,29 @@ async def main():
     log.info(f"[Server] Detection WS  -> ws://{config.SERVER_HOST}:{config.DETECTION_WS_PORT}")
     log.info(f"[Server] Camera stream -> ws://{config.SERVER_HOST}:{config.STREAM_WS_PORT}")
     log.info(f"[Server] PTZ control   -> ws://{config.SERVER_HOST}:{config.PTZ_WS_PORT}")
+    log.info("[Server] Running -- press Ctrl+C to stop.")
 
     try:
         async with detect_server, stream_server, ptz_server:
             await asyncio.Future()
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
     finally:
+        log.info("[Server] Shutting down...")
+        _shutdown.set()
         detector.obs_log.flush()
         log.info("[Detector] Observation log flushed.")
+        try:
+            motor.stop_moving()
+            motor.release()
+            log.info("[PTZ] Motor stopped.")
+        except Exception:
+            pass
+        log.info("[Server] Shutdown complete.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
