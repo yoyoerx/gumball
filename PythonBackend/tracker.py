@@ -5,11 +5,10 @@ tracker.py -- Object lock-on tracker for MetaGimbalVision.
 Connects to the same server as diagnostic.py:
   WS :{STREAM_PORT}  -- camera stream  (receive JPEG frames)
   WS :{DETECT_PORT}  -- detection      (send JPEG, receive detections)
-  WS :{PTZ_PORT}     -- PTZ control    (track object, return to home)
+  WS :{PTZ_PORT}     -- PTZ control    (track object, stop on loss)
 
 Click any bounding box to lock on. The camera centers and follows
-the selected object. When the object is lost the camera returns to
-its pre-tracking position.
+the selected object. When the object is lost the camera stops in place.
 
 Usage:
     python tracker.py [host]     # host defaults to config.SERVER_HOST
@@ -62,7 +61,7 @@ UI_MS    = 67        # ~15 Hz UI refresh -- matches camera frame rate
 # All values tuned for 15 fps (KC410S hardware limit).
 # At 15 fps: 1 frame = 67 ms, LOST_TIMEOUT_S=2.0 -> 30 frames of tolerance.
 
-DEAD_ZONE      = 0.12   # center no-move zone (fraction of frame)
+DEAD_ZONE      = 0.01   # center no-move zone (fraction of frame)
 MIN_SPEED      = 1
 MAX_SPEED      = 4      # conservative default; raise via UI slider if needed
 LOST_TIMEOUT_S = 2.0    # seconds absent before track considered lost (30 frames @ 15 fps)
@@ -90,7 +89,6 @@ _track_lock  = threading.Lock()
 _track_state = {
     "track_id":     None,      # int | None
     "track_label":  "",
-    "home_pos":     None,      # {"x": int, "y": int} | None
     "last_seen":    0.0,
     "offset":       (0.0, 0.0),
     "auditor_score": 1.0,      # latest ColorAuditor correlation score
@@ -238,7 +236,7 @@ def _tracking_thread():
     """
     Reads latest detections and sends PTZ commands to follow the tracked object.
     Runs at TRACK_HZ; holds last direction when object is briefly absent.
-    Returns camera to home position after LOST_TIMEOUT_S seconds of absence.
+    Stops the camera in place after LOST_TIMEOUT_S seconds of absence.
     """
     interval   = 1.0 / TRACK_HZ
     prev_dir   = None
@@ -289,22 +287,17 @@ def _tracking_thread():
 
         if target is None:
             if time.time() - last_seen > LOST_TIMEOUT_S:
-                # Track lost -- stop and return to home
+                # Track lost -- stop the camera in place
                 _ptz_cmd_q.put({"cmd": "ptz_stop"})
                 with _track_lock:
-                    home = _track_state["home_pos"]
                     _track_state.update({
                         "track_id":     None,
                         "track_label":  "",
-                        "home_pos":     None,
                         "offset":       (0.0, 0.0),
                         "auditor_score": 1.0,
                     })
                 auditor.clear()
                 _ptz_moving.clear()
-                if home:
-                    _ptz_cmd_q.put({"cmd": "ptz_goto",
-                                    "x": home["x"], "y": home["y"]})
                 prev_dir   = None
                 prev_speed = 0
             # Else: briefly absent -- hold current direction until timeout
@@ -350,22 +343,17 @@ def _tracking_thread():
                                     _track_state["auditor_score"] = round(rec_score, 3)
                                 current_tid = recovered_id
                             else:
-                                # Color mismatch with no recoverable anchor -- go home
+                                # Color mismatch with no recoverable anchor -- stop in place
                                 _ptz_cmd_q.put({"cmd": "ptz_stop"})
                                 _ptz_moving.clear()
                                 with _track_lock:
-                                    home = _track_state["home_pos"]
                                     _track_state.update({
                                         "track_id":      None,
                                         "track_label":   "",
-                                        "home_pos":      None,
                                         "offset":        (0.0, 0.0),
                                         "auditor_score": 0.0,
                                     })
                                 auditor.clear()
-                                if home:
-                                    _ptz_cmd_q.put({"cmd": "ptz_goto",
-                                                    "x": home["x"], "y": home["y"]})
                                 prev_dir   = None
                                 prev_speed = 0
                                 continue
@@ -432,11 +420,6 @@ class App(tk.Tk):
         self._fps         = 0.0
         self._conn        = {"stream": False, "detect": False, "ptz": False}
         self._dots        = {}
-
-        # "start tracking" flow -- waiting for ptz_get_position response
-        self._home_pending  = False
-        self._pending_tid   = None
-        self._pending_label = ""
 
         self._build_ui()
 
@@ -514,7 +497,7 @@ class App(tk.Tk):
 
         bstyle = dict(bg=BG3, fg=FG, font=("Arial", 9),
                       relief=tk.FLAT, padx=10, pady=4, cursor="hand2")
-        tk.Button(rp, text="Stop / Go Home", **bstyle,
+        tk.Button(rp, text="Stop Tracking", **bstyle,
                   command=self._stop_tracking).pack(anchor=tk.W)
 
         section("OFFSET")
@@ -543,14 +526,14 @@ class App(tk.Tk):
 
         self._speed_slider = _slider("Max speed  (1-10)", 1, 10, 1,
                                      "max_speed", int)
-        self._dz_slider    = _slider("Dead zone  (0.05-0.30)", 0.05, 0.30, 0.01,
+        self._dz_slider    = _slider("Dead zone  (0.01-0.30)", 0.01, 0.30, 0.01,
                                      "dead_zone", float)
 
         section("HOW TO USE")
         for line in (
             "Click a box to lock on.",
             "Camera centers & follows.",
-            "Lost -> returns to start.",
+            "Lost -> camera stops in place.",
             "Orange box = active track.",
         ):
             tk.Label(rp, text=line, bg=BG, fg=FG_DIM,
@@ -560,8 +543,6 @@ class App(tk.Tk):
     # ── Canvas click handler ──────────────────────────────────────────────────
 
     def _on_canvas_click(self, event):
-        if self._home_pending:
-            return  # already waiting for a position query to complete
         nx = event.x / CANVAS_W
         ny = event.y / CANVAS_H
         for det in self._dets_cache:
@@ -578,21 +559,8 @@ class App(tk.Tk):
                 return
 
     def _begin_track(self, tid: int, label: str):
-        """
-        Initiate a new lock-on: clear current track state, stop motion,
-        then send ptz_get_position so we can save the home position.
-        Tracking only starts after the position response arrives in _tick().
-        """
-        # Clear any active tracking so the tracking thread stops sending commands
-        with _track_lock:
-            _track_state.update({
-                "track_id":    None,
-                "track_label": "",
-                "home_pos":    None,
-                "offset":      (0.0, 0.0),
-            })
-
-        # Drain stale tracking commands from previous session
+        """Immediately lock on to the given detection — no home position saved."""
+        # Drain stale commands from any previous session
         while not _ptz_cmd_q.empty():
             try:
                 _ptz_cmd_q.get_nowait()
@@ -600,29 +568,30 @@ class App(tk.Tk):
                 break
 
         _ptz_cmd_q.put({"cmd": "ptz_stop"})
-        _ptz_cmd_q.put({"cmd": "ptz_get_position"})
+        auditor.clear()
+        _ptz_moving.clear()
 
-        self._home_pending  = True
-        self._pending_tid   = tid
-        self._pending_label = label
+        with _track_lock:
+            _track_state.update({
+                "track_id":     tid,
+                "track_label":  label,
+                "last_seen":    time.time(),
+                "offset":       (0.0, 0.0),
+                "auditor_score": 1.0,
+            })
 
     def _stop_tracking(self):
-        """Stop tracking and return camera to the saved home position."""
+        """Stop tracking and halt the camera in place."""
         with _track_lock:
-            home = _track_state["home_pos"]
             _track_state.update({
                 "track_id":     None,
                 "track_label":  "",
-                "home_pos":     None,
                 "offset":       (0.0, 0.0),
                 "auditor_score": 1.0,
             })
         auditor.clear()
         _ptz_moving.clear()
-        self._home_pending = False
         _ptz_cmd_q.put({"cmd": "ptz_stop"})
-        if home:
-            _ptz_cmd_q.put({"cmd": "ptz_goto", "x": home["x"], "y": home["y"]})
 
     # ── Main-thread tick (~30 Hz) ─────────────────────────────────────────────
 
@@ -695,23 +664,10 @@ class App(tk.Tk):
                 self._canvas.create_line(x0, y0, x1, y1,
                                          fill="#888888", width=1, tags="xhair")
 
-        # ── PTZ position response -> complete home-pos handshake ──────────────
+        # Drain PTZ responses (motor_ready acks) -- no processing needed
         while not _ptz_resp_q.empty():
             try:
-                resp = _ptz_resp_q.get_nowait()
-                if (self._home_pending
-                        and resp.get("ok")
-                        and "x" in resp
-                        and "y" in resp):
-                    home = {"x": resp["x"], "y": resp["y"]}
-                    with _track_lock:
-                        _track_state.update({
-                            "track_id":    self._pending_tid,
-                            "track_label": self._pending_label,
-                            "home_pos":    home,
-                            "last_seen":   time.time(),
-                        })
-                    self._home_pending = False
+                _ptz_resp_q.get_nowait()
             except queue.Empty:
                 break
 
@@ -722,14 +678,7 @@ class App(tk.Tk):
             offset        = _track_state["offset"]
             auditor_score = _track_state["auditor_score"]
 
-        if self._home_pending:
-            self._track_lbl.config(
-                text=f"Locking on...\n({self._pending_label})",
-                fg=YELLOW,
-            )
-            self._offset_lbl.config(text="x:  --      y:  --")
-            self._audit_lbl.config(text="color: --", fg=FG_DIM)
-        elif tid is not None:
+        if tid is not None:
             self._track_lbl.config(
                 text=f"Tracking: {label}  [ID {tid}]",
                 fg=ORANGE,
