@@ -45,10 +45,12 @@ The TP-Link Kasa KC410S is a consumer pan/tilt IP camera with no RTSP support an
 | `server.py` | Async WebSocket server; routes stream, PTZ, and detection traffic |
 | `kasa_camera.py` | Reads H.264 multipart stream from HTTPS :19443; decodes to BGR frames |
 | `kasa_motor_control.py` | Sends PTZ commands via Linkie protocol to HTTPS :10443 |
-| `detector.py` | YOLOv8 inference wrapper; returns detection JSON per frame |
+| `detector.py` | YOLOv8 inference + BoT-SORT tracking; returns detection JSON per frame |
 | `camera_discovery.py` | UDP broadcast scan for KC-series cameras; persists choice to `settings.json` |
 | `diagnostic.py` | Interactive runtime dashboard (stream FPS, PTZ position, detection rate) |
-| `tracker.py` | Desktop lock-on tracker: click a YOLO box, camera follows; returns home on loss |
+| `tracker.py` | Desktop lock-on tracker: click a YOLO box, camera follows; ColorAuditor validates identity; returns home on loss |
+| `color_auditor.py` | HSV histogram anchor store per track ID; EMA drift update; best-match recovery for ID swaps |
+| `custom_botsort.yaml` | BoT-SORT tracker config with Re-ID enabled; replaces bytetrack.yaml in detector.py |
 | `config.py` | Committed config; reads all values from `.env` via python-dotenv |
 | `.env` | Gitignored secrets file: IPs, Kasa credentials, model settings |
 | `.env.example` | Committed placeholder template; copy to `.env` and fill in values |
@@ -111,11 +113,34 @@ VideoStreamReceiver.OnFrameReceived
   -> ServerDetectionClient.SendFrame(jpegBytes)
   -> WS :9000 (binary)
   -> server.py handle_detection()
-  -> ObjectDetector.detect(jpegBytes) -> YOLOv8 inference
-  -> DetectionFrame JSON {"boxes":[...]}
+  -> ObjectDetector.detect(jpegBytes) -> YOLOv8 + BoT-SORT inference
+  -> DetectionFrame JSON {"detections":[{label, confidence, trackId, boundingBox},...]}
   -> WS :9000 back
   -> ServerDetectionClient.OnDetections
   -> DetectionOverlay: draw bounding boxes on VR canvas
+```
+
+### Lock-on tracking (tracker.py)
+
+```
+tracker.py _detect_loop
+  -> snapshot _latest_jpeg_for_audit alongside detection JSON
+  -> _latest_dets updated (normalized bounding boxes + track IDs)
+
+tracker.py _tracking_thread (10 Hz)
+  -> find target by track_id in _latest_dets
+  -> [if absent] Re-ID: search same-label dets closest to frame center -> re-adopt ID
+  -> decode _latest_jpeg_for_audit -> extract crop at bounding box coords
+  -> ColorAuditor.check_identity(track_id, crop)
+      -> HSV histogram vs. stored anchor (HISTCMP_CORREL)
+      -> score > threshold: EMA-update anchor, proceed
+      -> score <= threshold: call best_match() against all anchors
+          -> match found: re-adopt that track_id
+          -> no match:    trigger return-to-home
+  -> compute normalized offset (dx, dy) from frame center
+  -> dead zone check (configurable via UI slider)
+  -> ptz_start / ptz_stop -> _ptz_cmd_q -> WS :8082
+  -> [on loss > LOST_TIMEOUT_S] ptz_stop + ptz_goto(home_x, home_y)
 ```
 
 ---
@@ -152,6 +177,18 @@ Separate ports for stream (8081), PTZ (8082), and detection (9000) rather than o
 ### ADR-010: YOLOv8n default model
 YOLOv8 nano is the default for inference speed on the Python server. The `.pt` model file is gitignored; ultralytics downloads it on first run. Switch to `yolov8s.pt` / `yolov8m.pt` in `config.py` for better accuracy.
 
+### ADR-011: BoT-SORT with Re-ID replaces ByteTrack
+ByteTrack assigns new track IDs when fast camera pans cause bounding boxes to not overlap between frames (low IoU). BoT-SORT with `with_reid: True` adds an OSNet appearance embedding alongside IoU matching, maintaining ID continuity through occlusion and motion blur. Re-ID weights (~50 MB) are downloaded by ultralytics on first run with the new YAML. Config lives in `custom_botsort.yaml`; `track_buffer: 30` gives a 1-second memory window at 30 fps.
+
+### ADR-012: ColorAuditor as client-side identity guard layer
+Server-side BoT-SORT Re-ID can still swap IDs when two objects of similar appearance cross. `color_auditor.py` adds a second defense: per-ID HSV histogram anchors stored in `tracker.py`. On each tracking tick, a crop is extracted from the latest JPEG using normalized bounding box coordinates, and compared to the anchor via `cv2.HISTCMP_CORREL`. An EMA (alpha=0.1) slowly drifts the anchor to handle lighting changes without losing identity. On mismatch, `best_match()` scans all anchors to attempt recovery before triggering return-to-home. The auditor runs client-side (in `tracker.py`) because it needs pixel crops — only the detection JSON is transmitted over the WebSocket, not the image data.
+
+### ADR-013: Audit frame snapshotted alongside detection response
+The stream (WS :8081) and detection (WS :9000) connections are independent. When a detection response arrives, the current `_state["jpeg"]` may be a frame or two newer than the one that was detected. For HSV histogram comparison this timing imprecision is acceptable (~100 ms at 10 Hz detection / 30 fps stream); the color distribution of a person's clothing does not change frame-to-frame. A sequence-tagged ring buffer can be added if false-positives are observed in practice.
+
+### ADR-014: Minimum crop size before anchoring
+The first appearance of a track ID sets its color anchor. If the object is heavily occluded at first appearance, the histogram will be polluted with background pixels. Anchoring is skipped for crops where either dimension is below `min_crop_px` (default 20 px), allowing a cleaner anchor to be established once the object is fully visible.
+
 ---
 
 ## Project structure
@@ -171,6 +208,8 @@ MetaGimbalVision/
 |   +-- camera_discovery.py
 |   +-- diagnostic.py
 |   +-- tracker.py           <- Lock-on object tracker (click box -> camera follows)
+|   +-- color_auditor.py     <- HSV histogram identity guard (planned: Phase 9)
+|   +-- custom_botsort.yaml  <- BoT-SORT tracker config with Re-ID (planned: Phase 9)
 |   +-- config.py            <- Committed; reads from .env via python-dotenv
 |   +-- .env.example         <- Committed template; copy to .env
 |   +-- .env                 <- Gitignored; fill in real credentials
@@ -214,6 +253,7 @@ MetaGimbalVision/
 | 4 | YOLOv8 server-side detection + VR bounding box overlay | Done |
 | 5 | Camera discovery + in-VR control panel | Done |
 | 6 | Lock-on — click VR feed to slew camera | Done |
+| 9 | Robust tracking — BoT-SORT Re-ID + ColorAuditor HSV identity guard | In Progress |
 | 7 | On-device detection — export YOLOv8n to ONNX, Unity Sentis | TODO |
 | 8 | Quest 3 production deployment — APK, wireless perf tuning | TODO |
 
@@ -221,9 +261,11 @@ MetaGimbalVision/
 
 ## Open questions
 
+- Phase 9: ColorAuditor threshold — should it relax automatically while camera is actively panning (motion blur changes apparent color)?
+- Phase 9: If two objects of the same class and similar color are in frame, best_match() may mis-assign on ID swap; no solution yet beyond raising the match threshold
 - Phase 7: Sentis ONNX runtime vs. server-side: latency trade-off at wire speed
 - Phase 8: JPEG quality vs. frame rate budget over Wi-Fi at Quest 3 wireless bitrate
 
 ---
 
-*Last updated: 2026-05-12 — ADR-009 updated: credentials moved to .env + python-dotenv*
+*Last updated: 2026-05-14 — Phase 9 added: BoT-SORT Re-ID + ColorAuditor tracking plan; ADRs 011-014*
