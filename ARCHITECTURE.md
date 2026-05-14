@@ -178,7 +178,7 @@ Separate ports for stream (8081), PTZ (8082), and detection (9000) rather than o
 YOLOv8 nano is the default for inference speed on the Python server. The `.pt` model file is gitignored; ultralytics downloads it on first run. Switch to `yolov8s.pt` / `yolov8m.pt` in `config.py` for better accuracy.
 
 ### ADR-011: BoT-SORT with Re-ID replaces ByteTrack
-ByteTrack assigns new track IDs when fast camera pans cause bounding boxes to not overlap between frames (low IoU). BoT-SORT with `with_reid: True` adds an OSNet appearance embedding alongside IoU matching, maintaining ID continuity through occlusion and motion blur. Re-ID weights (~50 MB) are downloaded by ultralytics on first run with the new YAML. Config lives in `custom_botsort.yaml`; `track_buffer: 30` gives a 1-second memory window at 30 fps.
+ByteTrack assigns new track IDs when fast camera pans cause bounding boxes to not overlap between frames (low IoU). BoT-SORT with `with_reid: True` adds an OSNet appearance embedding alongside IoU matching, maintaining ID continuity through occlusion and motion blur. Re-ID weights (~50 MB) are downloaded by ultralytics on first run with the new YAML. Config lives in `custom_botsort.yaml`; `track_buffer: 45` gives a ~3-second memory window at 15 fps (the KC410S hardware limit).
 
 ### ADR-012: ColorAuditor as client-side identity guard layer
 Server-side BoT-SORT Re-ID can still swap IDs when two objects of similar appearance cross. `color_auditor.py` adds a second defense: per-ID HSV histogram anchors stored in `tracker.py`. On each tracking tick, a crop is extracted from the latest JPEG using normalized bounding box coordinates, and compared to the anchor via `cv2.HISTCMP_CORREL`. An EMA (alpha=0.1) slowly drifts the anchor to handle lighting changes without losing identity. On mismatch, `best_match()` scans all anchors to attempt recovery before triggering return-to-home. The auditor runs client-side (in `tracker.py`) because it needs pixel crops — only the detection JSON is transmitted over the WebSocket, not the image data.
@@ -261,6 +261,7 @@ MetaGimbalVision/
 
 ## Open questions
 
+- KC410S streams at 15 fps (hardware limit, confirmed by spec and measurement). 4MP sensor downscaled to 1280x720 over HTTPS. No software path to higher frame rate.
 - Phase 9: ColorAuditor threshold — should it relax automatically while camera is actively panning (motion blur changes apparent color)?
 - Phase 9: If two objects of the same class and similar color are in frame, best_match() may mis-assign on ID swap; no solution yet beyond raising the match threshold
 - Phase 7: Sentis ONNX runtime vs. server-side: latency trade-off at wire speed

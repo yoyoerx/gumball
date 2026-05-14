@@ -214,7 +214,7 @@ def _motor_init_thread():
 
 # ── Camera stream relay ───────────────────────────────────────────────────────
 
-_STREAM_FPS     = 30
+_STREAM_FPS     = 15   # KC410S hardware limit -- delivers 15 fps regardless of resolution
 _STREAM_QUALITY = 80
 _RECONNECT_SECS = 5
 

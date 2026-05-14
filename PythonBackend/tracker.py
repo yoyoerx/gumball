@@ -56,16 +56,18 @@ DETECT_PORT = 9000
 
 CANVAS_W = 640
 CANVAS_H = 360
-UI_MS    = 33        # ~30 Hz UI refresh
+UI_MS    = 67        # ~15 Hz UI refresh -- matches camera frame rate
 
 # ── Tracking parameters ───────────────────────────────────────────────────────
+# All values tuned for 15 fps (KC410S hardware limit).
+# At 15 fps: 1 frame = 67 ms, LOST_TIMEOUT_S=2.0 -> 30 frames of tolerance.
 
 DEAD_ZONE      = 0.12   # center no-move zone (fraction of frame)
 MIN_SPEED      = 1
 MAX_SPEED      = 4      # conservative default; raise via UI slider if needed
-LOST_TIMEOUT_S = 2.0    # seconds absent before track considered lost
-DETECT_HZ      = 10     # detection requests per second
-TRACK_HZ       = 10     # PTZ command rate while tracking
+LOST_TIMEOUT_S = 2.0    # seconds absent before track considered lost (30 frames @ 15 fps)
+DETECT_HZ      = 12     # detection requests per second (sends ~80% of frames at 15 fps)
+TRACK_HZ       = 15     # PTZ command rate -- match camera frame rate
 RECONNECT_S    = 3
 
 # ── Palette ───────────────────────────────────────────────────────────────────
