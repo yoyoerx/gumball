@@ -12,6 +12,8 @@ Run: python server.py
 import asyncio
 import json
 import logging
+import socket
+import sys
 import time
 import threading
 
@@ -248,6 +250,9 @@ def capture_loop(loop: asyncio.AbstractEventLoop):
 
         log.info(f"[Stream] KC410S connected at {ip} -> ws port {config.STREAM_WS_PORT}")
         try:
+            frame_times: list[float] = []
+            _FPS_WIN = 30
+            _fps_log_t = time.monotonic()
             while cam.is_open() and not _shutdown.is_set():
                 if _camera_switch_evt.is_set():
                     log.info("[Stream] Camera switch requested -- reconnecting...")
@@ -257,6 +262,15 @@ def capture_loop(loop: asyncio.AbstractEventLoop):
                 frame = cam.read_frame()
                 if frame is None:
                     break
+
+                now = time.monotonic()
+                frame_times.append(now)
+                if len(frame_times) > _FPS_WIN:
+                    frame_times.pop(0)
+                if now - _fps_log_t >= 5.0 and len(frame_times) > 1:
+                    fps = (len(frame_times) - 1) / max(frame_times[-1] - frame_times[0], 1e-6)
+                    log.info(f"[Stream] broadcast fps={fps:.1f}  clients={len(stream_clients)}")
+                    _fps_log_t = now
 
                 if stream_clients:
                     _, jpeg = cv2.imencode(".jpg", frame,
@@ -288,7 +302,33 @@ async def broadcast(data: bytes):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _check_ports(host: str, *ports: int) -> int | None:
+    """Return the first port that is already in use on host, or None if all are free."""
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, port))
+            except OSError:
+                return port
+    return None
+
+
 async def main():
+    # Check ports before starting anything so we never get partial-init warnings.
+    busy = _check_ports(
+        config.SERVER_HOST,
+        config.DETECTION_WS_PORT, config.STREAM_WS_PORT, config.PTZ_WS_PORT
+    )
+    if busy:
+        log.error(
+            f"[Server] Port {busy} is already in use -- is another instance running?\n"
+            f"         Ports: detection={config.DETECTION_WS_PORT}  "
+            f"stream={config.STREAM_WS_PORT}  "
+            f"ptz={config.PTZ_WS_PORT}"
+        )
+        sys.exit(1)
+
     loop = asyncio.get_running_loop()
 
     # Suppress websockets connection-closed noise on shutdown

@@ -48,8 +48,8 @@ PTZ_PORT        = 8082
 DETECT_PORT     = 9000
 VIDEO_W         = 640
 VIDEO_H         = 360
-DETECT_INTERVAL = 0.5   # seconds between frames sent to detector
-UI_MS           = 33    # ~30 fps UI refresh
+DETECT_INTERVAL = 0.08  # seconds between frames sent to detector (~12 Hz)
+UI_MS           = 67    # ~15 fps UI refresh -- matches KC410S frame rate
 RECONNECT_S     = 3
 
 # ── Palette ────────────────────────────────────────────────────────────────────
@@ -93,34 +93,45 @@ def _hex(rgb: tuple) -> str:
 
 # ── Background WebSocket coroutines ────────────────────────────────────────────
 
+_FPS_WINDOW = 30  # rolling window size for FPS measurement
+
 async def _stream_loop(host: str):
     url = f"ws://{host}:{STREAM_PORT}"
     while not _stop.is_set():
         try:
             async with websockets.connect(url, max_size=20_000_000) as ws:
                 _status_q.put(("stream", True, "Connected"))
-                _log(f"Stream connected → {url}")
-                n = 0
-                t0 = time.monotonic()
+                _log(f"Stream connected -> {url}")
+                times: list[float] = []  # timestamps of last N frames
                 async for msg in ws:
                     if _stop.is_set():
                         break
                     if not isinstance(msg, bytes):
                         continue
-                    n += 1
-                    fps = n / max(time.monotonic() - t0, 1e-6)
+                    now = time.monotonic()
+                    times.append(now)
+                    if len(times) > _FPS_WINDOW:
+                        times.pop(0)
+                    fps = (len(times) - 1) / max(times[-1] - times[0], 1e-6) if len(times) > 1 else 0.0
                     with _lock:
                         _state["jpeg"] = msg
+                    # Decode and resize on this background thread so the main
+                    # thread only calls ImageTk.PhotoImage() (fast).
+                    # 1280->640 is exact 2:1 so NEAREST is visually identical to BILINEAR.
                     try:
-                        _frame_q.put_nowait((msg, fps))
+                        img = Image.open(BytesIO(msg)).resize(
+                            (VIDEO_W, VIDEO_H), Image.NEAREST)
+                        _frame_q.put_nowait((img, fps))
                     except queue.Full:
+                        pass
+                    except Exception:
                         pass
         except Exception as e:
             _status_q.put(("stream", False, str(e)))
-            _log(f"Stream ✗  {e}")
+            _log(f"Stream error: {e}")
         if not _stop.is_set():
             await asyncio.sleep(RECONNECT_S)
-    _status_q.put(("stream", False, "–"))
+    _status_q.put(("stream", False, "-"))
 
 
 async def _ptz_loop(host: str):
@@ -129,7 +140,7 @@ async def _ptz_loop(host: str):
         try:
             async with websockets.connect(url) as ws:
                 _status_q.put(("ptz", True, "Connected"))
-                _log(f"PTZ connected → {url}")
+                _log(f"PTZ connected -> {url}")
                 await ws.send(json.dumps({"cmd": "ptz_get_position"}))
                 while not _stop.is_set():
                     while not _ptz_cmd_q.empty():
@@ -144,7 +155,7 @@ async def _ptz_loop(host: str):
                         await asyncio.sleep(0.02)
         except Exception as e:
             _status_q.put(("ptz", False, str(e)))
-            _log(f"PTZ ✗  {e}")
+            _log(f"PTZ error: {e}")
         if not _stop.is_set():
             await asyncio.sleep(RECONNECT_S)
     _status_q.put(("ptz", False, "–"))
@@ -156,8 +167,9 @@ async def _detect_loop(host: str):
         try:
             async with websockets.connect(url, max_size=5_000_000) as ws:
                 _status_q.put(("detect", True, "Connected"))
-                _log(f"Detection connected → {url}")
-                last_send = 0.0
+                _log(f"Detection connected -> {url}")
+                last_send    = 0.0
+                last_det_log = 0.0   # throttle detection log to 1/s max
                 while not _stop.is_set():
                     now = time.monotonic()
                     if now - last_send >= DETECT_INTERVAL:
@@ -174,21 +186,22 @@ async def _detect_loop(host: str):
                             _detect_q.put_nowait(data)
                         except queue.Full:
                             pass
-                        if dets:
+                        if dets and now - last_det_log >= 1.0:
                             summary = ", ".join(
                                 (f"[{d.get('trackId',0)}]" if d.get('trackId') else "")
                                 + f"{d['label']} {d['confidence']:.0%}"
                                 for d in dets[:5]
                             )
                             _log(f"Detected ({len(dets)}): {summary}")
+                            last_det_log = now
                     except asyncio.TimeoutError:
                         pass
         except Exception as e:
             _status_q.put(("detect", False, str(e)))
-            _log(f"Detection ✗  {e}")
+            _log(f"Detection error: {e}")
         if not _stop.is_set():
             await asyncio.sleep(RECONNECT_S)
-    _status_q.put(("detect", False, "–"))
+    _status_q.put(("detect", False, "-"))
 
 
 def _launch(coro_fn, *args):
@@ -314,6 +327,8 @@ class App(tk.Tk):
         self._canvas.create_text(VIDEO_W // 2, VIDEO_H // 2,
                                  text="Connecting to stream…",
                                  fill=FG_DIM, font=("Arial", 14), tags="placeholder")
+        # Pre-create image item once; updated via itemconfigure to avoid stacking
+        self._img_item = self._canvas.create_image(0, 0, anchor=tk.NW)
 
         self._fps_var = tk.StringVar(value="– fps")
         tk.Label(vf, textvariable=self._fps_var, bg=BG, fg=FG_DIM,
@@ -443,9 +458,12 @@ class App(tk.Tk):
                 if key in self._dots:
                     self._dots[key].configure(fg=GREEN if ok else RED)
 
-            # Video frame — render with current detection overlay
+            # Video frame — drain to latest only, render once
+            latest_frame = None
             while not _frame_q.empty():
-                jpeg, fps = _frame_q.get_nowait()
+                latest_frame = _frame_q.get_nowait()
+            if latest_frame is not None:
+                jpeg, fps = latest_frame
                 self._fps_var.set(f"{fps:.1f} fps")
                 try:
                     self._render_frame(jpeg)
@@ -512,9 +530,7 @@ class App(tk.Tk):
 
     # ── Rendering ──────────────────────────────────────────────────────────────
 
-    def _render_frame(self, jpeg: bytes):
-        img = Image.open(BytesIO(jpeg)).resize((VIDEO_W, VIDEO_H), Image.BILINEAR)
-
+    def _render_frame(self, img: Image.Image):
         if self._dets:
             draw = ImageDraw.Draw(img)
             for det in self._dets:
@@ -538,7 +554,7 @@ class App(tk.Tk):
 
         self._canvas.delete("placeholder")
         self._photo = ImageTk.PhotoImage(img)
-        self._canvas.create_image(0, 0, anchor=tk.NW, image=self._photo)
+        self._canvas.itemconfigure(self._img_item, image=self._photo)
 
     def _update_det_list(self, infer_ms: float = 0):
         for i, row in enumerate(self._det_rows):
@@ -569,6 +585,6 @@ class App(tk.Tk):
 
 if __name__ == "__main__":
     host = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_HOST
-    print(f"Connecting to server at {host}…")
+    print(f"Connecting to server at {host}...")
     App(host).mainloop()
     _stop.set()

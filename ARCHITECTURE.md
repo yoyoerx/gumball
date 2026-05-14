@@ -189,6 +189,12 @@ The stream (WS :8081) and detection (WS :9000) connections are independent. When
 ### ADR-014: Minimum crop size before anchoring
 The first appearance of a track ID sets its color anchor. If the object is heavily occluded at first appearance, the histogram will be polluted with background pixels. Anchoring is skipped for crops where either dimension is below `min_crop_px` (default 20 px), allowing a cleaner anchor to be established once the object is fully visible.
 
+### ADR-015: diagnostic.py JPEG decode on background thread
+`_render_frame` originally called `Image.open(BytesIO(jpeg)).resize(...)` on the main tkinter thread, consuming ~20–30 ms per frame inside the 67 ms UI tick budget. The decode and resize are now performed in `_stream_loop` (a daemon thread) before the PIL Image is placed in `_frame_q`. The main thread only calls `ImageTk.PhotoImage()` and `itemconfigure()`, which are fast. `Image.NEAREST` is used for the 1280→640 2:1 downscale; at exact integer ratios it is visually identical to `BILINEAR` but ~3× faster. The canvas image item is pre-created once in `_build_video` and updated via `itemconfigure` to avoid item stacking.
+
+### ADR-016: Server port pre-flight check
+`websockets.serve()` creates internal coroutines lazily; if binding fails mid-context-entry, already-created coroutines are left unawaited, producing `RuntimeWarning: coroutine 'create_server' was never awaited`. A synchronous `_check_ports(host, *ports)` function probes each port with a temporary `socket.bind()` before any async work begins. On conflict it logs a clear human-readable error and calls `sys.exit(1)` — no coroutines are ever created. The check uses the same `SERVER_HOST` as the actual bind; checking `""` (all-interfaces) misses conflicts on Windows when the existing server is bound to a specific IP.
+
 ---
 
 ## Project structure
@@ -208,8 +214,9 @@ MetaGimbalVision/
 |   +-- camera_discovery.py
 |   +-- diagnostic.py
 |   +-- tracker.py           <- Lock-on object tracker (click box -> camera follows)
-|   +-- color_auditor.py     <- HSV histogram identity guard (planned: Phase 9)
-|   +-- custom_botsort.yaml  <- BoT-SORT tracker config with Re-ID (planned: Phase 9)
+|   +-- color_auditor.py     <- HSV histogram identity guard
+|   +-- custom_botsort.yaml  <- BoT-SORT tracker config with Re-ID
+|   +-- measure_fps.py       <- Standalone benchmark: direct camera read + encode latency
 |   +-- config.py            <- Committed; reads from .env via python-dotenv
 |   +-- .env.example         <- Committed template; copy to .env
 |   +-- .env                 <- Gitignored; fill in real credentials
@@ -261,7 +268,7 @@ MetaGimbalVision/
 
 ## Open questions
 
-- KC410S streams at 15 fps (hardware limit, confirmed by spec and measurement). 4MP sensor downscaled to 1280x720 over HTTPS. No software path to higher frame rate.
+- KC410S streams at 15 fps (hardware spec) but real-world server delivery is ~13 fps due to HTTPS read latency variance (~65 ms avg, occasionally exceeds 66.7 ms budget). No software path to raise it.
 - Phase 9: ColorAuditor threshold — should it relax automatically while camera is actively panning (motion blur changes apparent color)?
 - Phase 9: If two objects of the same class and similar color are in frame, best_match() may mis-assign on ID swap; no solution yet beyond raising the match threshold
 - Phase 7: Sentis ONNX runtime vs. server-side: latency trade-off at wire speed
@@ -269,4 +276,4 @@ MetaGimbalVision/
 
 ---
 
-*Last updated: 2026-05-14 — Phase 9 added: BoT-SORT Re-ID + ColorAuditor tracking plan; ADRs 011-014*
+*Last updated: 2026-05-14 — ADRs 015-016: diagnostic decode threading, server port pre-flight check; 13 fps real-world ceiling documented*
