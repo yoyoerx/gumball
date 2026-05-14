@@ -1,0 +1,26 @@
+# BoT-SORT tracker configuration for MetaGimbalVision
+# Tuned for a pan/tilt camera that actively moves to follow objects.
+#
+# Key differences from botsort.yaml defaults:
+#   gmc_method: sparseOptFlow -- compensates for camera pan/tilt motion
+#   with_reid: True           -- OSNet appearance embeddings for cross-occlusion ID continuity
+#   track_buffer: 30          -- ~1 second of ID memory at 30 fps
+
+tracker_type: botsort
+
+track_high_thresh:  0.5     # min confidence to start a new track
+track_low_thresh:   0.1     # min confidence to keep an unconfirmed track alive
+new_track_thresh:   0.6     # min confidence to confirm a brand-new track
+track_buffer:       30      # frames to hold a lost track before discarding (~1 s at 30 fps)
+match_thresh:       0.8     # IoU/cost threshold for track-detection association
+fuse_score:         True    # fuse detection score with IoU for matching
+
+# Global motion compensation -- critical for moving camera; offsets frame-to-frame
+# displacement so track matching uses object-relative motion, not absolute pixel shift
+gmc_method: sparseOptFlow   # sparseOptFlow|orb|sift|ecc|none
+
+# Re-ID appearance embeddings
+with_reid:          True    # enable OSNet Re-ID; weights downloaded on first run (~50 MB)
+model:              auto    # "auto" uses detector backbone features when available
+proximity_thresh:   0.5     # min IoU to consider tracks proximate for Re-ID
+appearance_thresh:  0.5     # cosine distance threshold for appearance match (lower = stricter)

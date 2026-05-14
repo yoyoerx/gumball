@@ -28,7 +28,11 @@ import time
 import tkinter as tk
 from io import BytesIO
 
+import cv2
+import numpy as np
 import websockets
+
+from color_auditor import ColorAuditor
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -82,12 +86,16 @@ _latest_dets: list = []       # latest detection list from detect_loop
 
 _track_lock  = threading.Lock()
 _track_state = {
-    "track_id":    None,      # int | None
-    "track_label": "",
-    "home_pos":    None,      # {"x": int, "y": int} | None
-    "last_seen":   0.0,
-    "offset":      (0.0, 0.0),
+    "track_id":     None,      # int | None
+    "track_label":  "",
+    "home_pos":     None,      # {"x": int, "y": int} | None
+    "last_seen":    0.0,
+    "offset":       (0.0, 0.0),
+    "auditor_score": 1.0,      # latest ColorAuditor correlation score
 }
+
+_audit_lock              = threading.Lock()
+_latest_jpeg_for_audit: bytes | None = None
 
 # ── Queues ────────────────────────────────────────────────────────────────────
 
@@ -100,6 +108,9 @@ _stop = threading.Event()
 
 # Live-tunable parameters (written by UI sliders, read by tracking thread)
 _tune = {"max_speed": MAX_SPEED, "dead_zone": DEAD_ZONE}
+
+# Shared ColorAuditor instance (accessed by tracking thread and _stop_tracking)
+auditor = ColorAuditor()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -171,9 +182,14 @@ async def _detect_loop(host: str):
                     try:
                         raw  = await asyncio.wait_for(ws.recv(), timeout=0.05)
                         dets = json.loads(raw).get("detections", [])
+                        with _lock:
+                            audit_jpeg = _state["jpeg"]
                         with _dets_lock:
                             global _latest_dets
                             _latest_dets = dets
+                        global _latest_jpeg_for_audit
+                        with _audit_lock:
+                            _latest_jpeg_for_audit = audit_jpeg
                     except asyncio.TimeoutError:
                         pass
         except Exception:
@@ -272,11 +288,13 @@ def _tracking_thread():
                 with _track_lock:
                     home = _track_state["home_pos"]
                     _track_state.update({
-                        "track_id":    None,
-                        "track_label": "",
-                        "home_pos":    None,
-                        "offset":      (0.0, 0.0),
+                        "track_id":     None,
+                        "track_label":  "",
+                        "home_pos":     None,
+                        "offset":       (0.0, 0.0),
+                        "auditor_score": 1.0,
                     })
+                auditor.clear()
                 if home:
                     _ptz_cmd_q.put({"cmd": "ptz_goto",
                                     "x": home["x"], "y": home["y"]})
@@ -288,6 +306,62 @@ def _tracking_thread():
         # Object found -- update last_seen timestamp
         with _track_lock:
             _track_state["last_seen"] = time.time()
+            current_tid = _track_state["track_id"]
+
+        # ── Color audit ───────────────────────────────────────────────────────
+        # Extract crop from the JPEG that was paired with this detection batch.
+        # Skip if bounding box is below 5% of frame (too small for reliable audit).
+        with _audit_lock:
+            jpeg_for_crop = _latest_jpeg_for_audit
+
+        if jpeg_for_crop is not None:
+            arr = np.frombuffer(jpeg_for_crop, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is not None:
+                h_img, w_img = img.shape[:2]
+                bb_a = target.get("boundingBox", {})
+                bw_n = bb_a.get("width",  0)
+                bh_n = bb_a.get("height", 0)
+                if bw_n >= 0.05 and bh_n >= 0.05:
+                    x1 = int(bb_a.get("x", 0) * w_img)
+                    y1 = int(bb_a.get("y", 0) * h_img)
+                    x2 = int((bb_a.get("x", 0) + bw_n) * w_img)
+                    y2 = int((bb_a.get("y", 0) + bh_n) * h_img)
+                    crop = img[y1:y2, x1:x2]
+
+                    audit_valid, audit_score = auditor.check_identity(current_tid, crop)
+
+                    if not audit_valid:
+                        # Try color-based recovery before giving up
+                        recovered_id, rec_score = auditor.best_match(crop)
+                        if recovered_id is not None and rec_score >= auditor.threshold:
+                            with _track_lock:
+                                _track_state["track_id"]     = recovered_id
+                                _track_state["last_seen"]    = time.time()
+                                _track_state["auditor_score"] = round(rec_score, 3)
+                            current_tid = recovered_id
+                        else:
+                            # Color mismatch with no recoverable anchor -- go home
+                            _ptz_cmd_q.put({"cmd": "ptz_stop"})
+                            with _track_lock:
+                                home = _track_state["home_pos"]
+                                _track_state.update({
+                                    "track_id":     None,
+                                    "track_label":  "",
+                                    "home_pos":     None,
+                                    "offset":       (0.0, 0.0),
+                                    "auditor_score": 0.0,
+                                })
+                            auditor.clear()
+                            if home:
+                                _ptz_cmd_q.put({"cmd": "ptz_goto",
+                                                "x": home["x"], "y": home["y"]})
+                            prev_dir   = None
+                            prev_speed = 0
+                            continue
+                    else:
+                        with _track_lock:
+                            _track_state["auditor_score"] = round(audit_score, 3)
 
         # Read live-tunable parameters
         dead_zone = _tune["dead_zone"]
@@ -435,6 +509,9 @@ class App(tk.Tk):
         self._offset_lbl = tk.Label(rp, text="x:  --      y:  --",
                                     bg=BG, fg=FG, font=("Courier", 9))
         self._offset_lbl.pack(anchor=tk.W, pady=(2, 0))
+        self._audit_lbl = tk.Label(rp, text="color: --",
+                                   bg=BG, fg=FG_DIM, font=("Courier", 9))
+        self._audit_lbl.pack(anchor=tk.W, pady=(1, 0))
 
         section("TUNING")
 
@@ -522,11 +599,13 @@ class App(tk.Tk):
         with _track_lock:
             home = _track_state["home_pos"]
             _track_state.update({
-                "track_id":    None,
-                "track_label": "",
-                "home_pos":    None,
-                "offset":      (0.0, 0.0),
+                "track_id":     None,
+                "track_label":  "",
+                "home_pos":     None,
+                "offset":       (0.0, 0.0),
+                "auditor_score": 1.0,
             })
+        auditor.clear()
         self._home_pending = False
         _ptz_cmd_q.put({"cmd": "ptz_stop"})
         if home:
@@ -625,9 +704,10 @@ class App(tk.Tk):
 
         # ── Tracking status labels ────────────────────────────────────────────
         with _track_lock:
-            tid    = _track_state["track_id"]
-            label  = _track_state["track_label"]
-            offset = _track_state["offset"]
+            tid           = _track_state["track_id"]
+            label         = _track_state["track_label"]
+            offset        = _track_state["offset"]
+            auditor_score = _track_state["auditor_score"]
 
         if self._home_pending:
             self._track_lbl.config(
@@ -635,6 +715,7 @@ class App(tk.Tk):
                 fg=YELLOW,
             )
             self._offset_lbl.config(text="x:  --      y:  --")
+            self._audit_lbl.config(text="color: --", fg=FG_DIM)
         elif tid is not None:
             self._track_lbl.config(
                 text=f"Tracking: {label}  [ID {tid}]",
@@ -642,9 +723,12 @@ class App(tk.Tk):
             )
             dx, dy = offset
             self._offset_lbl.config(text=f"x: {dx:+.3f}    y: {dy:+.3f}")
+            score_fg = GREEN if auditor_score >= 0.55 else YELLOW if auditor_score >= 0.35 else RED
+            self._audit_lbl.config(text=f"color: {auditor_score:.2f}", fg=score_fg)
         else:
             self._track_lbl.config(text="Not tracking", fg=FG_DIM)
             self._offset_lbl.config(text="x:  --      y:  --")
+            self._audit_lbl.config(text="color: --", fg=FG_DIM)
 
         self.after(UI_MS, self._tick)
 

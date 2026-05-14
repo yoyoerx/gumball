@@ -154,13 +154,13 @@ class ObjectDetector:
             conf    = config.CONFIDENCE,
             iou     = config.IOU,
             persist = True,
-            tracker = "bytetrack.yaml",
+            tracker = "custom_botsort.yaml",
             verbose = False,
         )[0]
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        # Extract track IDs — None when ByteTrack has no assignments this frame
+        # Extract track IDs — None when BoT-SORT has no assignments this frame
         ids = (results.boxes.id.int().tolist()
                if results.boxes.id is not None
                else [0] * len(results.boxes))
